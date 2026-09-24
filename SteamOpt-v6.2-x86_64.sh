@@ -418,55 +418,58 @@ SVCEOF
 }
 
 apply_kernel_params() {
-    log "Configuring kernel boot parameters..."
+    echo "[*] Configuring kernel boot parameters..."
 
-    if grep -q "nowatchdog" /etc/default/grub 2>/dev/null; then
-        log "Kernel params already configured"
-    else
-        sudo sed -i '/nmi_watchdog/d' /etc/default/grub 2>/dev/null || true
+    KERNEL_PARAMS="nowatchdog nmi_watchdog=0"
+    BACKUP_DIR="$BACKUP_ROOT/kernel-params-$(date +%Y%m%d-%H%M%S)"
 
-        if grep -q 'GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub; then
-            sudo sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="\([^"]*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 nowatchdog nmi_watchdog=0"/' /etc/default/grub
-            success "Updated GRUB cmdline"
-        else
-            echo 'GRUB_CMDLINE_LINUX_DEFAULT="nowatchdog nmi_watchdog=0"' | \
-                sudo tee -a /etc/default/grub > /dev/null
-            success "Appended GRUB cmdline"
-        fi
-    fi
+    mkdir -p "$BACKUP_DIR"
 
-    # Auto-detect GRUB config location
-    local grub_cfg=""
-    local candidates=(
-        "/boot/efi/EFI/steamos/grub.cfg"
-        "/boot/efi/EFI/BOOT/grub.cfg"
-        "/boot/efi/EFI/systemd/grub.cfg"
-        "/boot/grub/grub.cfg"
-        "/boot/grub2/grub.cfg"
-    )
+    # Method 1: Patch SteamOS systemd-boot entries (Neptune layout)
+    if [[ -d "/esp/SteamOS/conf" ]]; then
+        echo "[*] Detected SteamOS systemd-boot layout, patching /esp/SteamOS/conf/*"
 
-    for cfg in "${candidates[@]}"; do
-        if [[ -f "$cfg" ]]; then
-            grub_cfg="$cfg"
-            break
-        fi
-    done
+        local patched_any=false
+        for conf in /esp/SteamOS/conf/*.conf; do
+            [[ -f "$conf" ]] || continue
+            [[ "$conf" == *"dev.conf"* ]] && continue  # Skip dev configs
 
-    if [[ -z "$grub_cfg" ]]; then
-        # Last resort: hunt for any grub.cfg under /boot
-        grub_cfg=$(sudo find /boot -name 'grub.cfg' 2>/dev/null | head -n 1)
-    fi
+            # Backup before edit
+            cp "$conf" "$BACKUP_DIR/$(basename "$conf")"
 
-    if [[ -n "$grub_cfg" ]]; then
-        if sudo grub-mkconfig -o "$grub_cfg" > /dev/null 2>&1; then
-            success "GRUB config updated: $grub_cfg — REBOOT REQUIRED"
-        else
-            warn "grub-mkconfig failed for $grub_cfg"
+            # Idempotency check
+            if ! grep -q "nowatchdog" "$conf"; then
+                sudo sed -i "s/^options \(.*\)/options \1 $KERNEL_PARAMS/" "$conf"
+                patched_any=true
+                echo "[OK] Added $KERNEL_PARAMS to $(basename "$conf")"
+            else
+                echo "[!] $KERNEL_PARAMS already present in $(basename "$conf")"
+            fi
+        done
+
+        if $patched_any; then
+            echo "[OK] Kernel params patched in systemd-boot entries"
+            grep -h "nowatchdog" /esp/SteamOS/conf/*.conf 2>/dev/null || echo "[!] Receipt verification failed"
         fi
     else
-        warn "No grub.cfg found anywhere under /boot — kernel params saved to /etc/default/grub but NOT loaded"
-        warn "Locate manually: sudo find /boot -name '*.cfg' -o -name 'grub*'"
+        echo "[!] /esp/SteamOS/conf not found — skipping systemd-boot patching"
     fi
+
+    # Method 2: Fallback to GRUB (non-SteamOS or older layouts)
+    if [[ -f "/etc/default/grub" ]]; then
+        echo "[*] Fallback: also patching /etc/default/grub"
+
+        cp /etc/default/grub "$BACKUP_DIR/grub"
+
+        if ! grep -q "nowatchdog" /etc/default/grub; then
+            sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/GRUB_CMDLINE_LINUX_DEFAULT="nowatchdog nmi_watchdog=0 /' /etc/default/grub
+            echo "[OK] Added kernel params to /etc/default/grub"
+        else
+            echo "[!] Kernel params already present in /etc/default/grub"
+        fi
+    fi
+
+    echo "[OK] Boot params configured (verify with: cat /proc/cmdline after reboot)"
 }
 
 apply_io_scheduler() {
