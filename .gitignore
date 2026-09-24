@@ -1,4 +1,4 @@
-*.bak-*
+*.bak*
 steam-optim-backup-*/
 *.log
 *~
