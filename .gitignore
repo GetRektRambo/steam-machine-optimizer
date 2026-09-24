@@ -1,0 +1,8 @@
+*.bak-*
+steam-optim-backup-*/
+*.log
+*~
+.*.swp
+.vscode/
+.idea/
+.DS_Store
