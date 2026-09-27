@@ -1,5 +1,16 @@
 # Changelog
 
+## v6.3 — 2026-09-27
+- Weekly SSD TRIM: enables the stock `fstrim.timer` when present
+  (SteamOS ships it), custom fallback otherwise. First manual run
+  trimmed 120GB across partitions. Verify is now 17 checks.
+- Loggers hardened: a failed log-file write can no longer abort an
+  optimization run (it previously masqueraded as a backup failure).
+- `${USER:-root}` fallback in LOG_FILE for the systemd boot path.
+- Known strata: duplicate `do_uninstall()` definitions from the v6.2
+  lineage still present — harmless (bash uses the last definition),
+  slated for a v6.4 cleanup.
+
 ## v6.3 (2026-09-24) — Public Release
 - Added `--uninstall` function with backup-aware config restoration
 - All previous fixes retained

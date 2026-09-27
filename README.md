@@ -21,6 +21,7 @@ fewer stutters, smoother frame times, and no crashes when games eat RAM.
 | THP | varies | `madvise`, defrag never | Kills random 200ms freezes |
 | MGLRU | often unused | enabled | Smarter memory reclaim |
 | Kernel watchdog | active | disabled | Less latency jitter |
+| SSD TRIM | Game Mode maintenance only | weekly `fstrim` (stock timer) | SSD stays fast, less write amplification |
 
 **Who this is for:** Wall-powered Steam Machines/desktops. Not for Steam Deck or laptops on battery.
 
@@ -46,7 +47,7 @@ chmod +x SteamOpt-v6.2-x86_64.sh
 ./SteamOpt-v6.2-x86_64.sh --verify
 ```
 
-You want **16 passed, 0 failed**.
+You want **17 passed, 0 failed**.
 
 4. **Play.** Settings persist in the background.
 
