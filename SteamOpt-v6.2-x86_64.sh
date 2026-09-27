@@ -19,9 +19,9 @@ IFS=$'\n\t'
 # ── Runtime Configuration ───────────────────────────────────────────
 declare -r SCRIPT_NAME="$(basename "$0")"
 declare -r SCRIPT_PATH="$(readlink -f "$0")"
-declare -r LOG_FILE="/tmp/steam-machine-opt-${SUDO_USER:-$USER}.log"
+declare -r LOG_FILE="/tmp/steam-machine-opt-${SUDO_USER:-${USER:-root}}.log"
 declare -r MARKER_FILE="/etc/steam-opt-marker"
-declare -r CONFIG_VERSION="v6.2"
+declare -r CONFIG_VERSION="v6.3"
 declare -r BACKUP_RETENTION=5
 
 declare -r SWAP_SIZE_GB=20
@@ -39,10 +39,10 @@ readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
 
 # ── Logging ─────────────────────────────────────────────────────────
-log()     { echo -e "${CYAN}[*]${NC} $(date '+%H:%M:%S') $1" | tee -a "$LOG_FILE"; }
-success() { echo -e "${GREEN}[✓]${NC} $(date '+%H:%M:%S') $1" | tee -a "$LOG_FILE"; }
-warn()    { echo -e "${YELLOW}[!]${NC} $(date '+%H:%M:%S') $1" | tee -a "$LOG_FILE"; }
-error()   { echo -e "${RED}[✗]${NC} $(date '+%H:%M:%S') $1" | tee -a "$LOG_FILE" >&2; }
+log()     { echo -e "${CYAN}[*]${NC} $(date '+%H:%M:%S') $1" | tee -a "$LOG_FILE" 2>/dev/null || true; }
+success() { echo -e "${GREEN}[✓]${NC} $(date '+%H:%M:%S') $1" | tee -a "$LOG_FILE" 2>/dev/null || true; }
+warn()    { echo -e "${YELLOW}[!]${NC} $(date '+%H:%M:%S') $1" | tee -a "$LOG_FILE" 2>/dev/null || true; }
+error()   { echo -e "${RED}[✗]${NC} $(date '+%H:%M:%S') $1" | tee -a "$LOG_FILE" 2>/dev/null >&2 || true; }
 
 die() {
     error "$1"
@@ -418,58 +418,55 @@ SVCEOF
 }
 
 apply_kernel_params() {
-    echo "[*] Configuring kernel boot parameters..."
+    log "Configuring kernel boot parameters..."
 
-    KERNEL_PARAMS="nowatchdog nmi_watchdog=0"
-    BACKUP_DIR="$BACKUP_ROOT/kernel-params-$(date +%Y%m%d-%H%M%S)"
+    if grep -q "nowatchdog" /etc/default/grub 2>/dev/null; then
+        log "Kernel params already configured"
+    else
+        sudo sed -i '/nmi_watchdog/d' /etc/default/grub 2>/dev/null || true
 
-    mkdir -p "$BACKUP_DIR"
+        if grep -q 'GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub; then
+            sudo sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="\([^"]*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 nowatchdog nmi_watchdog=0"/' /etc/default/grub
+            success "Updated GRUB cmdline"
+        else
+            echo 'GRUB_CMDLINE_LINUX_DEFAULT="nowatchdog nmi_watchdog=0"' | \
+                sudo tee -a /etc/default/grub > /dev/null
+            success "Appended GRUB cmdline"
+        fi
+    fi
 
-    # Method 1: Patch SteamOS systemd-boot entries (Neptune layout)
-    if [[ -d "/esp/SteamOS/conf" ]]; then
-        echo "[*] Detected SteamOS systemd-boot layout, patching /esp/SteamOS/conf/*"
+    # Auto-detect GRUB config location
+    local grub_cfg=""
+    local candidates=(
+        "/boot/efi/EFI/steamos/grub.cfg"
+        "/boot/efi/EFI/BOOT/grub.cfg"
+        "/boot/efi/EFI/systemd/grub.cfg"
+        "/boot/grub/grub.cfg"
+        "/boot/grub2/grub.cfg"
+    )
 
-        local patched_any=false
-        for conf in /esp/SteamOS/conf/*.conf; do
-            [[ -f "$conf" ]] || continue
-            [[ "$conf" == *"dev.conf"* ]] && continue  # Skip dev configs
+    for cfg in "${candidates[@]}"; do
+        if [[ -f "$cfg" ]]; then
+            grub_cfg="$cfg"
+            break
+        fi
+    done
 
-            # Backup before edit
-            cp "$conf" "$BACKUP_DIR/$(basename "$conf")"
+    if [[ -z "$grub_cfg" ]]; then
+        # Last resort: hunt for any grub.cfg under /boot
+        grub_cfg=$(sudo find /boot -name 'grub.cfg' 2>/dev/null | head -n 1)
+    fi
 
-            # Idempotency check
-            if ! grep -q "nowatchdog" "$conf"; then
-                sudo sed -i "s/^options \(.*\)/options \1 $KERNEL_PARAMS/" "$conf"
-                patched_any=true
-                echo "[OK] Added $KERNEL_PARAMS to $(basename "$conf")"
-            else
-                echo "[!] $KERNEL_PARAMS already present in $(basename "$conf")"
-            fi
-        done
-
-        if $patched_any; then
-            echo "[OK] Kernel params patched in systemd-boot entries"
-            grep -h "nowatchdog" /esp/SteamOS/conf/*.conf 2>/dev/null || echo "[!] Receipt verification failed"
+    if [[ -n "$grub_cfg" ]]; then
+        if sudo grub-mkconfig -o "$grub_cfg" > /dev/null 2>&1; then
+            success "GRUB config updated: $grub_cfg — REBOOT REQUIRED"
+        else
+            warn "grub-mkconfig failed for $grub_cfg"
         fi
     else
-        echo "[!] /esp/SteamOS/conf not found — skipping systemd-boot patching"
+        warn "No grub.cfg found anywhere under /boot — kernel params saved to /etc/default/grub but NOT loaded"
+        warn "Locate manually: sudo find /boot -name '*.cfg' -o -name 'grub*'"
     fi
-
-    # Method 2: Fallback to GRUB (non-SteamOS or older layouts)
-    if [[ -f "/etc/default/grub" ]]; then
-        echo "[*] Fallback: also patching /etc/default/grub"
-
-        cp /etc/default/grub "$BACKUP_DIR/grub"
-
-        if ! grep -q "nowatchdog" /etc/default/grub; then
-            sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/GRUB_CMDLINE_LINUX_DEFAULT="nowatchdog nmi_watchdog=0 /' /etc/default/grub
-            echo "[OK] Added kernel params to /etc/default/grub"
-        else
-            echo "[!] Kernel params already present in /etc/default/grub"
-        fi
-    fi
-
-    echo "[OK] Boot params configured (verify with: cat /proc/cmdline after reboot)"
 }
 
 apply_io_scheduler() {
@@ -505,6 +502,45 @@ SVCEOF
 
     sudo udevadm control --reload-rules 2>/dev/null || true
     success "I/O scheduler configured"
+}
+
+apply_trim() {
+    log "Enabling weekly SSD TRIM..."
+
+    # Prefer the stock systemd unit — upstream-maintained schedule
+    if systemctl list-unit-files fstrim.timer 2>/dev/null | grep -q '^fstrim.timer'; then
+        sudo systemctl enable --now fstrim.timer 2>/dev/null && \
+            success "Weekly SSD TRIM enabled (stock fstrim.timer)" || \
+            warn "Could not enable stock fstrim.timer"
+        return 0
+    fi
+
+    # Fallback: our own timer (only if the stock unit is absent)
+    sudo tee /etc/systemd/system/ssd-trim.service > /dev/null << 'SVCEOF'
+[Unit]
+Description=SSD TRIM Maintenance
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/fstrim -av
+SVCEOF
+
+    sudo tee /etc/systemd/system/ssd-trim.timer > /dev/null << 'SVCEOF'
+[Unit]
+Description=Weekly SSD TRIM Timer
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+SVCEOF
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now ssd-trim.timer 2>/dev/null && \
+        success "Weekly SSD TRIM enabled (custom timer)" || \
+        warn "Could not enable ssd-trim.timer"
 }
 
 apply_noatime() {
@@ -621,6 +657,14 @@ do_verify() {
     [[ "$(systemctl is-active cpu-monitor.timer 2>/dev/null)" == "active" ]] && \
         pass "CPU Monitor Timer (60s polling)" || \
         fail "CPU Monitor Timer (not active)"
+
+    # Weekly SSD TRIM (either the stock unit or our fallback)
+    if [[ "$(systemctl is-enabled fstrim.timer 2>/dev/null)" == "enabled" || \
+          "$(systemctl is-enabled ssd-trim.timer 2>/dev/null)" == "enabled" ]]; then
+        pass "Weekly SSD TRIM"
+    else
+        fail "Weekly SSD TRIM (not enabled)"
+    fi
 
     # Installed binary
     [[ -x /usr/local/bin/steammachine_opt.sh ]] && \
@@ -744,12 +788,15 @@ do_uninstall() {
         thp-watch.path
         thp-watch.service
         nvme-scheduler.service
+        ssd-trim.timer
+        ssd-trim.service
     )
 
     for unit in "${units[@]}"; do
         sudo systemctl disable --now "$unit" 2>/dev/null || true
         sudo rm -f "/etc/systemd/system/$unit"
     done
+    sudo systemctl disable fstrim.timer 2>/dev/null || true
     sudo systemctl daemon-reload
     sudo systemctl reset-failed 2>/dev/null || true
     success "All services, hooks, timers, and watchers removed"
@@ -867,12 +914,15 @@ do_uninstall() {
         thp-watch.path
         thp-watch.service
         nvme-scheduler.service
+        ssd-trim.timer
+        ssd-trim.service
     )
 
     for unit in "${units[@]}"; do
         sudo systemctl disable --now "$unit" 2>/dev/null || true
         sudo rm -f "/etc/systemd/system/$unit"
     done
+    sudo systemctl disable fstrim.timer 2>/dev/null || true
     sudo systemctl daemon-reload
     sudo systemctl reset-failed 2>/dev/null || true
     success "All services, hooks, timers, and watchers removed"
@@ -945,6 +995,7 @@ do_apply() {
     apply_mglru
     apply_kernel_params
     apply_io_scheduler
+    apply_trim
     apply_noatime
 
     write_marker
